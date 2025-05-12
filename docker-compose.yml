@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  client:
+    build: ./client
+    ports:
+      - "5173:5173"
+      - "4173:4173"
+    networks:
+      - app-network
+
+  server:
+    build: ./server
+    ports:
+      - "8000:8000"
+    networks:
+      - app-network
+
+  monitoring:
+    build: ./monitoring
+    ports:
+      - "3000:3000"
+    networks:
+      - app-network
+
+  reverse-proxy:
+    build: ./reverse-proxy
+    ports:
+      - "80:80"
+    depends_on:
+      - client
+      - server
+      - monitoring
+    networks:
+      - app-network
+
+  ssh-dev:
+    build:
+      ports:
+        - "2222:22"
+      privileged: true
+      networks:
+        - app-network
+
+networks:
+  app-network:
