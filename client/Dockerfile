@@ -1,6 +1,12 @@
 FROM node:lts-alpine
 WORKDIR /app
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile --production=false
 COPY . .
-RUN yarn install
 EXPOSE 5173
-CMD ["yarn", "run", "dev"]
+CMD ["yarn", "dev", "--host"]
+
+
+
+
+

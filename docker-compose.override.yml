@@ -1,6 +1,0 @@
-x-develop:
-  watch:
-    - path: ./client
-      action: rebuild
-    - path: ./server
-      action: sync
