@@ -1,0 +1,81 @@
+# .github/workflows/ci-docker-build.yml
+name: CI – Docker Build Check
+
+# Utilise pull_request_target pour pouvoir créer des issues avec GITHUB_TOKEN
+on:
+  pull_request_target:
+    branches:
+      - dev
+
+# Assure-toi que le token a bien le droit de créer des issues
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR code
+        # On checkout le code de la branche de la PR (et pas du fork)
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Build client Docker image
+        id: client_build
+        continue-on-error: true
+        run: |
+          set +e
+          docker build -f client/Dockerfile -t client-check client/ > client_build.log 2>&1
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+      - name: Build server Docker image
+        id: server_build
+        continue-on-error: true
+        run: |
+          set +e
+          docker build -f server/Dockerfile -t server-check server/ > server_build.log 2>&1
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+      - name: Create issue on Docker build failure
+        if: ${{ steps.client_build.outputs.exit_code != '0' || steps.server_build.outputs.exit_code != '0' }}
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request.number;
+            const { owner, repo } = context.repo;
+            const clientExit = ${{ steps.client_build.outputs.exit_code }};
+            const serverExit = ${{ steps.server_build.outputs.exit_code }};
+            const clientLog = fs.readFileSync('client_build.log', 'utf8');
+            const serverLog = fs.readFileSync('server_build.log', 'utf8');
+
+            const body = `
+            ## Docker build failed on PR #${prNumber}
+
+            **Client build** – exit code: ${clientExit}
+            \`\`\`
+            ${clientLog}
+            \`\`\`
+
+            **Server build** – exit code: ${serverExit}
+            \`\`\`
+            ${serverLog}
+            \`\`\`
+            `;
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `Docker build failed on PR #${prNumber}`,
+              body,
+              labels: ['ci','docker-build-failure']
+            });

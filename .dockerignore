@@ -1,0 +1,30 @@
+# — Git
+.git
+.gitignore
+
+# — Variables d’environnement
+.env
+.env.*.local
+
+# — Client (Vite)
+client/node_modules
+client/dist
+
+# — Python / Django
+__pycache__
+*.pyc
+server/.venv
+
+# — Base de données locale
+*.sqlite3
+
+# — Logs & couverture
+*.log
+coverage
+htmlcov
+.coverage*
+
+# — IDE & OS
+.vscode
+.idea
+.DS_Store
