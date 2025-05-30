@@ -1,0 +1,415 @@
+name: CI – Docker Build Check
+
+on:
+  pull_request_target:
+    branches:
+      - dev
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  checks: write
+
+env:
+  REGISTRY: ghcr.io
+  CLIENT_IMAGE_NAME: client-check
+  SERVER_IMAGE_NAME: server-check
+
+jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    outputs:
+      safe-to-build: ${{ steps.security-check.outputs.safe }}
+    steps:
+      - name: Security check for forks
+        id: security-check
+        run: |
+          if [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+            echo "🔒 PR from fork detected - Enhanced security checks required"
+            echo "safe=false" >> $GITHUB_OUTPUT
+            
+            # Pour les forks, on peut ajouter des vérifications supplémentaires
+            # Par exemple, vérifier que l'auteur est un contributeur connu
+            echo "⚠️ Manual approval required for fork PRs"
+          else
+            echo "✅ PR from same repository - Safe to build"
+            echo "safe=true" >> $GITHUB_OUTPUT
+          fi
+
+  docker-build:
+    needs: security-check
+    runs-on: ubuntu-latest
+    # Permettre l'exécution même pour les forks après vérification manuelle
+    if: needs.security-check.outputs.safe-to-build == 'true' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [client, server]
+    
+    outputs:
+      client-status: ${{ steps.build-status.outputs.client-status }}
+      server-status: ${{ steps.build-status.outputs.server-status }}
+      client-size: ${{ steps.image-info.outputs.client-size }}
+      server-size: ${{ steps.image-info.outputs.server-size }}
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate build context info
+        id: context
+        run: |
+          echo "pr-number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          echo "pr-author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
+          echo "head-sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "build-timestamp=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Check Dockerfile exists
+        id: dockerfile-check
+        run: |
+          SERVICE="${{ matrix.service }}"
+          DOCKERFILE_PATH="${SERVICE}/Dockerfile"
+          
+          if [[ -f "$DOCKERFILE_PATH" ]]; then
+            echo "✅ Dockerfile found: $DOCKERFILE_PATH"
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "path=$DOCKERFILE_PATH" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Dockerfile not found: $DOCKERFILE_PATH"
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Missing Dockerfile for $SERVICE service" >> build_$SERVICE.log
+          fi
+
+      - name: Build Docker image
+        id: docker-build
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        continue-on-error: true
+        run: |
+          SERVICE="${{ matrix.service }}"
+          IMAGE_NAME="${SERVICE}-check"
+          BUILD_LOG="build_${SERVICE}.log"
+          
+          echo "🏗️ Building $SERVICE Docker image..."
+          echo "📁 Context: $SERVICE/"
+          echo "📋 Dockerfile: ${{ steps.dockerfile-check.outputs.path }}"
+          
+          # Capturer à la fois stdout et stderr
+          {
+            echo "=== Docker Build Start ==="
+            echo "Service: $SERVICE"
+            echo "Timestamp: $(date -u)"
+            echo "PR: #${{ steps.context.outputs.pr-number }}"
+            echo "SHA: ${{ steps.context.outputs.head-sha }}"
+            echo "=========================="
+            echo ""
+            
+            docker buildx build \
+              --file "${{ steps.dockerfile-check.outputs.path }}" \
+              --tag "$IMAGE_NAME:pr-${{ steps.context.outputs.pr-number }}" \
+              --tag "$IMAGE_NAME:${{ steps.context.outputs.head-sha }}" \
+              --load \
+              --progress=plain \
+              "$SERVICE/" 2>&1
+              
+            BUILD_EXIT_CODE=$?
+            echo ""
+            echo "=== Build Summary ==="
+            echo "Exit code: $BUILD_EXIT_CODE"
+            echo "===================="
+            
+            exit $BUILD_EXIT_CODE
+          } | tee "$BUILD_LOG"
+          
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "build_log=$BUILD_LOG" >> $GITHUB_OUTPUT
+
+      - name: Get image information
+        id: image-info
+        if: steps.docker-build.outputs.exit_code == '0'
+        continue-on-error: true
+        run: |
+          SERVICE="${{ matrix.service }}"
+          IMAGE_NAME="${{ steps.docker-build.outputs.image_name }}"
+          
+          if docker image inspect "$IMAGE_NAME:pr-${{ steps.context.outputs.pr-number }}" >/dev/null 2>&1; then
+            # Taille de l'image
+            SIZE=$(docker image inspect "$IMAGE_NAME:pr-${{ steps.context.outputs.pr-number }}" --format='{{.Size}}')
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            
+            # Informations sur les layers
+            LAYERS=$(docker history "$IMAGE_NAME:pr-${{ steps.context.outputs.pr-number }}" --no-trunc --format "table {{.CreatedBy}}" | wc -l)
+            
+            echo "${SERVICE}_size=${SIZE_MB}MB" >> $GITHUB_OUTPUT
+            echo "${SERVICE}_layers=$LAYERS" >> $GITHUB_OUTPUT
+            echo "✅ Image $SERVICE: ${SIZE_MB}MB, $LAYERS layers"
+          else
+            echo "⚠️ Could not inspect image $IMAGE_NAME"
+          fi
+
+      - name: Set build status
+        id: build-status
+        run: |
+          SERVICE="${{ matrix.service }}"
+          EXIT_CODE="${{ steps.docker-build.outputs.exit_code }}"
+          
+          if [[ "${{ steps.dockerfile-check.outputs.exists }}" != "true" ]]; then
+            echo "${SERVICE}_status=missing_dockerfile" >> $GITHUB_OUTPUT
+          elif [[ "$EXIT_CODE" == "0" ]]; then
+            echo "${SERVICE}_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "${SERVICE}_status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.service }}
+          path: build_${{ matrix.service }}.log
+          retention-days: 7
+
+  report:
+    needs: [docker-build]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all build logs
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-logs-*
+          merge-multiple: true
+
+      - name: Analyze build results
+        id: analysis
+        run: |
+          CLIENT_STATUS="${{ needs.docker-build.outputs.client-status }}"
+          SERVER_STATUS="${{ needs.docker-build.outputs.server-status }}"
+          
+          FAILED_SERVICES=""
+          SUCCESS_SERVICES=""
+          
+          if [[ "$CLIENT_STATUS" == "failed" || "$CLIENT_STATUS" == "missing_dockerfile" ]]; then
+            FAILED_SERVICES="$FAILED_SERVICES client"
+          elif [[ "$CLIENT_STATUS" == "success" ]]; then
+            SUCCESS_SERVICES="$SUCCESS_SERVICES client"
+          fi
+          
+          if [[ "$SERVER_STATUS" == "failed" || "$SERVER_STATUS" == "missing_dockerfile" ]]; then
+            FAILED_SERVICES="$FAILED_SERVICES server"
+          elif [[ "$SERVER_STATUS" == "success" ]]; then
+            SUCCESS_SERVICES="$SUCCESS_SERVICES server"
+          fi
+          
+          echo "failed_services=$FAILED_SERVICES" >> $GITHUB_OUTPUT
+          echo "success_services=$SUCCESS_SERVICES" >> $GITHUB_OUTPUT
+          
+          if [[ -n "$FAILED_SERVICES" ]]; then
+            echo "overall_status=failure" >> $GITHUB_OUTPUT
+          else
+            echo "overall_status=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or update PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request.number;
+            const { owner, repo } = context.repo;
+            
+            const clientStatus = "${{ needs.docker-build.outputs.client-status }}";
+            const serverStatus = "${{ needs.docker-build.outputs.server-status }}";
+            const clientSize = "${{ needs.docker-build.outputs.client-size }}";
+            const serverSize = "${{ needs.docker-build.outputs.server-size }}";
+            const overallStatus = "${{ steps.analysis.outputs.overall_status }}";
+            
+            const statusEmoji = (status) => {
+              switch(status) {
+                case 'success': return '✅';
+                case 'failed': return '❌';
+                case 'missing_dockerfile': return '⚠️';
+                default: return '❓';
+              }
+            };
+            
+            const buildSection = (service, status, size) => {
+              const emoji = statusEmoji(status);
+              let details = `${emoji} **${service.charAt(0).toUpperCase() + service.slice(1)}**: `;
+              
+              switch(status) {
+                case 'success':
+                  details += `Build successful ${size ? `(${size})` : ''}`;
+                  break;
+                case 'failed':
+                  details += 'Build failed - Check logs below';
+                  break;
+                case 'missing_dockerfile':
+                  details += 'Dockerfile not found';
+                  break;
+                default:
+                  details += 'Status unknown';
+              }
+              return details;
+            };
+            
+            let body = `## 🐳 Docker Build Report
+            
+            ${overallStatus === 'success' ? '🎉 All builds successful!' : '⚠️ Some builds failed'}
+            
+            ### Build Status
+            ${buildSection('client', clientStatus, clientSize)}
+            ${buildSection('server', serverStatus, serverSize)}
+            
+            ### Build Details
+            - **PR**: #${prNumber}
+            - **Author**: @${{ github.event.pull_request.user.login }}
+            - **Commit**: \`${{ github.event.pull_request.head.sha }}\`
+            - **Timestamp**: ${new Date().toISOString()}
+            `;
+            
+            // Ajouter les logs en cas d'échec
+            if (overallStatus === 'failure') {
+              body += '\n### 🔍 Build Logs\n';
+              
+              ['client', 'server'].forEach(service => {
+                const status = service === 'client' ? clientStatus : serverStatus;
+                if (status === 'failed' || status === 'missing_dockerfile') {
+                  try {
+                    const logFile = `build_${service}.log`;
+                    if (fs.existsSync(logFile)) {
+                      const log = fs.readFileSync(logFile, 'utf8');
+                      body += `\n<details>\n<summary>📋 ${service.charAt(0).toUpperCase() + service.slice(1)} Build Log</summary>\n\n\`\`\`\n${log.slice(-2000)}\n\`\`\`\n</details>\n`;
+                    }
+                  } catch (error) {
+                    console.error(`Error reading ${service} log:`, error);
+                    body += `\n❌ Could not read ${service} build log\n`;
+                  }
+                }
+              });
+            }
+            
+            body += '\n---\n*This comment is automatically updated on each push.*';
+            
+            // Chercher un commentaire existant
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo,
+              issue_number: prNumber
+            });
+            
+            const existingComment = comments.find(
+              comment => comment.user.type === 'Bot' && 
+              comment.body.includes('🐳 Docker Build Report')
+            );
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner, repo,
+                comment_id: existingComment.id,
+                body
+              });
+              console.log('✅ Updated existing PR comment');
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number: prNumber,
+                body
+              });
+              console.log('✅ Created new PR comment');
+            }
+
+      - name: Create issue on failure
+        if: steps.analysis.outputs.overall_status == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request.number;
+            const { owner, repo } = context.repo;
+            const failedServices = "${{ steps.analysis.outputs.failed_services }}".trim();
+            
+            if (!failedServices) return;
+            
+            // Vérifier s'il existe déjà une issue pour cette PR
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner, repo,
+              labels: 'ci,docker-build-failure',
+              state: 'open'
+            });
+            
+            const existingIssue = issues.find(issue => 
+              issue.title.includes(`PR #${prNumber}`)
+            );
+            
+            let issueBody = `## 🐳 Docker Build Failure - PR #${prNumber}
+            
+            **Failed services**: ${failedServices}
+            **PR Author**: @${{ github.event.pull_request.user.login }}
+            **PR Title**: ${{ github.event.pull_request.title }}
+            **Commit**: \`${{ github.event.pull_request.head.sha }}\`
+            
+            ### 🔗 Links
+            - [Pull Request #${prNumber}](${{ github.event.pull_request.html_url }})
+            - [Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ### 📋 Build Logs
+            `;
+            
+            // Ajouter les logs des services qui ont échoué
+            failedServices.split(' ').forEach(service => {
+              if (!service) return;
+              try {
+                const logFile = `build_${service}.log`;
+                if (fs.existsSync(logFile)) {
+                  const log = fs.readFileSync(logFile, 'utf8');
+                  issueBody += `\n<details>\n<summary>❌ ${service.charAt(0).toUpperCase() + service.slice(1)} Build Failure</summary>\n\n\`\`\`\n${log.slice(-3000)}\n\`\`\`\n</details>\n`;
+                }
+              } catch (error) {
+                console.error(`Error reading ${service} log:`, error);
+                issueBody += `\n❌ Could not read ${service} build log\n`;
+              }
+            });
+            
+            issueBody += `\n---\n*Issue created automatically on ${new Date().toISOString()}*`;
+            
+            if (existingIssue) {
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number: existingIssue.number,
+                body: issueBody
+              });
+              console.log(`✅ Updated existing issue #${existingIssue.number}`);
+            } else {
+              const { data: newIssue } = await github.rest.issues.create({
+                owner, repo,
+                title: `🐳 Docker build failed on PR #${prNumber}`,
+                body: issueBody,
+                labels: ['ci', 'docker-build-failure', 'bug'],
+                assignees: ['${{ github.event.pull_request.user.login }}']
+              });
+              console.log(`✅ Created new issue #${newIssue.number}`);
+            }
+
+      - name: Set workflow status
+        run: |
+          if [[ "${{ steps.analysis.outputs.overall_status }}" == "failure" ]]; then
+            echo "❌ Docker build workflow completed with failures"
+            exit 1
+          else
+            echo "✅ Docker build workflow completed successfully"
+          fi
