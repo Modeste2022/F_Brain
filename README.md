@@ -10,4 +10,6 @@ Authentification_Security
 -page "vous avez réussi à vous logez"
 
 
-Merci !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!# Test workflow Sat May 31 12:25:36 AM CEST 2025
+Merci !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+# Fix permissions test workflow Sat May 31 12:42:30 AM CEST 2025
