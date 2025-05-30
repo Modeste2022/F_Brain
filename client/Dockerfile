@@ -5,3 +5,4 @@ RUN yarn install --frozen-lockfile --production=false
 COPY . .
 EXPOSE 5173
 CMD ["yarn", "dev", "--host"]
+RUN invalid-command  # Erreur volontaire
