@@ -1,13 +1,10 @@
-# 🚀 CD (Continuous Deployment) - Promotion automatique dev → master
-# Ce workflow fait du DEPLOYMENT en promouvant automatiquement du code validé
-
-name: CD – Promote dev → master
+name: CD - Promote dev to master
 
 on:
   push:
     branches:
       - dev
-  workflow_dispatch:  # Permet déclenchement manuel
+  workflow_dispatch:
     inputs:
       force_promotion:
         description: 'Forcer la promotion même sans changements'
@@ -39,256 +36,95 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Pour avoir l'historique complet
+          fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Generate dummy .env for Docker Compose
+      - name: Validate Docker setup
         run: |
-          cat <<EOF > .env
-          POSTGRES_USER=ci_user
-          POSTGRES_PASSWORD=ci_pass
-          POSTGRES_DB=ci_db
-          NODE_ENV=test
-          PORT=3000
-          DATABASE_URL=postgresql://ci_user:ci_pass@localhost:5432/ci_db
-          JWT_SECRET=test_jwt_secret_key
-          API_BASE_URL=http://localhost:3000
-          # Ajoutez d'autres variables selon vos besoins
-          EOF
-
-      - name: Check Docker Compose version
-        run: |
-          docker --version
-          docker compose version
-
-      - name: Validate Compose file
-        run: |
-          echo "🔍 Validation du fichier Docker Compose..."
-          if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
+          if [ -f docker-compose.yml ]; then
             docker compose config --quiet
-            echo "✅ Fichier Docker Compose valide"
-          else
-            echo "⚠️ Aucun fichier Docker Compose trouvé - Skip"
+            docker compose build --quiet
           fi
 
-      - name: Build all services
-        run: |
-          echo "🏗️ Construction des services Docker..."
-          if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
-            docker compose build --parallel
-            echo "✅ Build Docker réussi"
-          else
-            echo "ℹ️ Pas de Docker Compose - Validation alternative"
-            # Validation alternative (npm, tests basiques, etc.)
-            if [ -f package.json ]; then
-              echo "📦 Validation Node.js..."
-              node --version
-              npm --version
-            fi
-          fi
-
-      - name: Run tests (optionnel)
-        run: |
-          echo "🧪 Exécution des tests..."
-          if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
-            # docker compose run --rm app npm test
-            # Décommentez et adaptez selon votre stack
-            echo "✅ Tests Docker (désactivés pour l'instant)"
-          elif [ -f package.json ]; then
-            # npm test
-            echo "✅ Tests npm (désactivés pour l'instant)"
-          else
-            echo "✅ Pas de tests configurés"
-          fi
-
-      - name: Check differences between dev and master
+      - name: Check differences
         id: diff-check
         run: |
-          git fetch origin master:master 2>/dev/null || git fetch origin master
-          DIFF_COUNT=$(git rev-list --count master..dev 2>/dev/null || echo "0")
+          git fetch origin master
+          DIFF_COUNT=$(git rev-list --count origin/master..HEAD)
           echo "commits-ahead=$DIFF_COUNT" >> $GITHUB_OUTPUT
-          echo "📊 Commits en avance sur master: $DIFF_COUNT"
-          
-          if [ "$DIFF_COUNT" -eq 0 ] && [ "${{ github.event.inputs.force_promotion }}" != "true" ]; then
-            echo "⚠️ Aucun nouveau commit sur dev"
-            echo "has-changes=false" >> $GITHUB_OUTPUT
-          else
-            echo "has-changes=true" >> $GITHUB_OUTPUT
-            
-            # Afficher les commits qui seront promus
-            echo "📋 Commits à promouvoir:"
-            git log --oneline master..dev --max-count=10
-          fi
+          [ "$DIFF_COUNT" -gt 0 ] || [ "${{ github.event.inputs.force_promotion }}" = "true" ]
+          echo "has-changes=$?" >> $GITHUB_OUTPUT
 
-      - name: Check for merge conflicts
+      - name: Check merge conflicts
         run: |
-          echo "🔍 Vérification des conflits de merge..."
-          git checkout master
-          git pull origin master --ff-only
-          git checkout dev
-          
-          # Test de merge simulation
-          MERGE_BASE=$(git merge-base master dev)
-          if git merge-tree $MERGE_BASE master dev | grep -q "<<<<<<< "; then
-            echo "❌ Conflits de merge détectés!"
-            git merge-tree $MERGE_BASE master dev | head -20
-            exit 1
-          else
-            echo "✅ Aucun conflit de merge détecté"
-          fi
+          git merge-tree $(git merge-base HEAD origin/master) HEAD origin/master | 
+          grep -q '<<<<<<<' && exit 1 || exit 0
 
       - name: Validation summary
         id: validation-check
         run: |
-          if [ "${{ steps.diff-check.outputs.has-changes }}" == "true" ]; then
+          if [ "${{ steps.diff-check.outputs.has-changes }}" = "1" ]; then
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "✅ Validation complète - Prêt pour promotion"
-            echo "📈 ${{ steps.diff-check.outputs.commits-ahead }} commit(s) à promouvoir"
           else
             echo "status=skipped" >> $GITHUB_OUTPUT
-            echo "ℹ️ Pas de changements à promouvoir"
           fi
 
   promote:
     needs: validate
-    runs-on: ubuntu-latest
     if: needs.validate.outputs.validation-status == 'success'
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout dev branch
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: dev
-          # ⚠️ IMPORTANT: Crée un secret PAT_TOKEN ou active les permissions GitHub Actions
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
-      - name: Configure Git
+      - name: Setup Git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 🆕 NOUVELLE APPROCHE: Utiliser gh CLI au lieu de l'API GitHub
-      - name: Create or update PR dev → master
-        id: create-pr
+      - name: Find or create PR
+        id: pr-management
         env:
-          # ⚠️ Utilise PAT_TOKEN si tu en crées un, sinon GITHUB_TOKEN après avoir activé les permissions
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          echo "🔍 Gestion de la PR dev → master avec gh CLI..."
-          
-          # Chercher une PR existante
-          existing_pr=$(gh pr list --head dev --base master --state open --json number --jq '.[0].number // empty')
-          
-          if [ -n "$existing_pr" ]; then
-            echo "♻️ PR existante trouvée: #$existing_pr"
-            pr_number=$existing_pr
-            
-            # Mettre à jour la description
-            gh pr edit $pr_number --body "## 🔄 Promotion automatique dev → master (Mise à jour)
-          
-          **Validation réussie ✅**
-          - Docker Compose build OK
-          - Configuration validée
-          - Tests passés
-          
-          **Merge automatique dans ${{ env.PROMOTION_DELAY }} secondes**
-          
-          _Mise à jour: $(date)_"
+          # Trouver une PR existante
+          PR_INFO=$(gh pr list --head dev --base master --state open --json number,title)
+          if [ "$(echo "$PR_INFO" | jq length)" -gt 0 ]; then
+            pr_number=$(echo "$PR_INFO" | jq -r '.[0].number')
+            echo "♻️ PR existante #$pr_number"
           else
-            echo "📝 Création d'une nouvelle PR..."
-            pr_number=$(gh pr create \
+            # Créer une nouvelle PR (méthode compatible)
+            pr_url=$(gh pr create \
               --head dev \
               --base master \
-              --title "🚀 Auto-promotion: dev → master" \
-              --body "## 🚀 Promotion automatique dev → master
-          
-          **Validation réussie ✅**
-          - Docker Compose build OK  
-          - Configuration validée
-          - Tests passés
-          
-          **Merge automatique dans ${{ env.PROMOTION_DELAY }} secondes**
-          
-          _Créée: $(date)_" \
-              --json number --jq .number)
-            echo "✅ Nouvelle PR créée: #$pr_number"
+              --title "🚀 Promotion auto: dev → master" \
+              --body "Promotion automatique - Validée par CI")
+            pr_number=$(echo "$pr_url" | grep -oE '/pull/[0-9]+' | cut -d'/' -f3)
+            echo "✅ Nouvelle PR #$pr_number"
           fi
-          
           echo "pr-number=$pr_number" >> $GITHUB_OUTPUT
 
-      - name: Wait before auto-merge
-        run: |
-          echo "⏳ Attente de ${{ env.PROMOTION_DELAY }} secondes..."
-          echo "🔗 PR: https://github.com/${{ github.repository }}/pull/${{ steps.create-pr.outputs.pr-number }}"
-          sleep ${{ env.PROMOTION_DELAY }}
+      - name: Wait before merge
+        run: sleep ${{ env.PROMOTION_DELAY }}
 
-      - name: Auto-merge PR
+      - name: Merge PR
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          pr_number="${{ steps.create-pr.outputs.pr-number }}"
-          echo "🔄 Merge de la PR #$pr_number..."
-          
-          # Merger avec gh CLI (plus fiable que l'API)
-          if gh pr merge $pr_number --merge --delete-branch=false; then
-            echo "✅ PR #$pr_number mergée avec succès!"
-            
-            # Commentaire de succès
-            gh pr comment $pr_number --body "🎉 **Promotion réussie !**
-          
-          dev → master mergé automatiquement
-          **Date:** $(date)"
-          else
-            echo "❌ Échec du merge"
-            gh pr comment $pr_number --body "❌ **Échec du merge automatique**
-          
-          Vérifiez les conflits ou les branch protection rules."
-            exit 1
-          fi
+          gh pr merge ${{ steps.pr-management.outputs.pr-number }} \
+            --merge \
+            --delete-branch=false \
+            --body "Mergé automatiquement par CD workflow"
 
   notify:
     needs: [validate, promote]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Notify on success
-        if: needs.promote.result == 'success'
-        run: |
-          echo "🎉 ✅ SUCCÈS: Promotion dev → master réussie !"
-          echo "📈 ${{ needs.validate.outputs.commits-count }} commit(s) promu(s)"
-          echo "🌟 La branche master a été mise à jour avec succès."
-          
-          # Notifications externes (décommenter selon besoins)
-          # curl -X POST -H 'Content-type: application/json' \
-          #   --data '{"text":"✅ CD Success: dev → master promoted with ${{ needs.validate.outputs.commits-count }} commits"}' \
-          #   "${{ secrets.SLACK_WEBHOOK_URL }}"
-
-      - name: Notify on failure
-        if: needs.promote.result == 'failure'
-        run: |
-          echo "❌ ÉCHEC: Promotion dev → master"
-          echo "🔍 Vérifiez les logs pour plus de détails."
-          echo "🛠️ Action manuelle requise."
-          
-          # Notification d'échec
-          # curl -X POST -H 'Content-type: application/json' \
-          #   --data '{"text":"❌ CD Failed: dev → master promotion failed - Manual intervention required"}' \
-          #   "${{ secrets.SLACK_WEBHOOK_URL }}"
-
-      - name: Notify on skip
-        if: needs.validate.outputs.validation-status == 'skipped'
-        run: |
-          echo "ℹ️ SKIP: Promotion ignorée"
-          echo "📋 Aucun nouveau commit sur dev par rapport à master"
-          echo "🔄 Prochaine promotion se déclenchera au prochain push"
-
       - name: Summary
-        if: always()
         run: |
-          echo "## 📋 Résumé du workflow CD"
-          echo "- **Branche source:** dev"  
-          echo "- **Branche cible:** master"
-          echo "- **Commits traités:** ${{ needs.validate.outputs.commits-count || '0' }}"
-          echo "- **Status validation:** ${{ needs.validate.outputs.validation-status || 'unknown' }}"
-          echo "- **Status promotion:** ${{ needs.promote.result || 'skipped' }}"
-          echo "- **Exécuté le:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "CD Workflow Result: ${{ needs.promote.result || 'skipped' }}"
+          echo "Commits promoted: ${{ needs.validate.outputs.commits-count || '0' }}"
