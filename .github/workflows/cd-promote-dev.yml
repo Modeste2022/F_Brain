@@ -39,34 +39,45 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Validate Docker setup
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker Compose
         run: |
           if [ -f docker-compose.yml ]; then
-            docker compose config --quiet
-            docker compose build --quiet
+            docker compose config --quiet || exit 1
+            docker compose build --quiet || exit 1
+          else
+            echo "No docker-compose.yml found - skipping validation"
           fi
 
-      - name: Check differences
+      - name: Check commit differences
         id: diff-check
         run: |
           git fetch origin master
           DIFF_COUNT=$(git rev-list --count origin/master..HEAD)
           echo "commits-ahead=$DIFF_COUNT" >> $GITHUB_OUTPUT
-          [ "$DIFF_COUNT" -gt 0 ] || [ "${{ github.event.inputs.force_promotion }}" = "true" ]
-          echo "has-changes=$?" >> $GITHUB_OUTPUT
+          
+          if [ "$DIFF_COUNT" -gt 0 ] || [ "${{ github.event.inputs.force_promotion }}" = "true" ]; then
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Check merge conflicts
+      - name: Verify merge compatibility
         run: |
           git merge-tree $(git merge-base HEAD origin/master) HEAD origin/master | 
-          grep -q '<<<<<<<' && exit 1 || exit 0
+          grep -q '<<<<<<<' && (echo "❌ Merge conflicts detected"; exit 1) || echo "✅ No merge conflicts"
 
       - name: Validation summary
         id: validation-check
         run: |
-          if [ "${{ steps.diff-check.outputs.has-changes }}" = "1" ]; then
+          if [ "${{ steps.diff-check.outputs.has-changes }}" = "true" ]; then
             echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ Validation passed - Ready for promotion"
           else
             echo "status=skipped" >> $GITHUB_OUTPUT
+            echo "ℹ️ No changes to promote"
           fi
 
   promote:
@@ -74,57 +85,81 @@ jobs:
     if: needs.validate.outputs.validation-status == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout dev branch
         uses: actions/checkout@v4
         with:
           ref: dev
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: Setup Git identity
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Find or create PR
-        id: pr-management
+      - name: Find existing PR
+        id: find-pr
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          # Trouver une PR existante
-          PR_INFO=$(gh pr list --head dev --base master --state open --json number,title)
-          if [ "$(echo "$PR_INFO" | jq length)" -gt 0 ]; then
-            pr_number=$(echo "$PR_INFO" | jq -r '.[0].number')
-            echo "♻️ PR existante #$pr_number"
+          PR_NUMBER=$(gh pr list --head dev --base master --state open --json number -q '.[0].number // empty')
+          if [ -n "$PR_NUMBER" ]; then
+            echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            echo "Found existing PR #$PR_NUMBER"
           else
-            # Créer une nouvelle PR (méthode compatible)
-            pr_url=$(gh pr create \
-              --head dev \
-              --base master \
-              --title "🚀 Promotion auto: dev → master" \
-              --body "Promotion automatique - Validée par CI")
-            pr_number=$(echo "$pr_url" | grep -oE '/pull/[0-9]+' | cut -d'/' -f3)
-            echo "✅ Nouvelle PR #$pr_number"
+            echo "pr-number=" >> $GITHUB_OUTPUT
           fi
-          echo "pr-number=$pr_number" >> $GITHUB_OUTPUT
 
-      - name: Wait before merge
-        run: sleep ${{ env.PROMOTION_DELAY }}
+      - name: Create PR if needed
+        id: create-pr
+        if: steps.find-pr.outputs.pr-number == ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(gh pr create \
+            --head dev \
+            --base master \
+            --title "🚀 Auto-promotion: dev → master [$(date +'%Y-%m-%d')]" \
+            --body "Automatic promotion from CI workflow")
+          
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '/pull/[0-9]+' | cut -d'/' -f3)
+          echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "Created PR #$PR_NUMBER"
+
+      - name: Wait for promotion delay
+        run: |
+          echo "⏳ Waiting ${{ env.PROMOTION_DELAY }} seconds before merge..."
+          sleep ${{ env.PROMOTION_DELAY }}
 
       - name: Merge PR
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge ${{ steps.pr-management.outputs.pr-number }} \
-            --merge \
-            --delete-branch=false \
-            --body "Mergé automatiquement par CD workflow"
+          PR_NUMBER=${{ steps.find-pr.outputs.pr-number || steps.create-pr.outputs.pr-number }}
+          
+          if ! gh pr merge "$PR_NUMBER" --merge --delete-branch=false; then
+            echo "::error::Failed to merge PR #$PR_NUMBER"
+            gh pr comment "$PR_NUMBER" --body "❌ Merge failed - Please check manually"
+            exit 1
+          fi
+          
+          echo "✅ Successfully merged PR #$PR_NUMBER"
+          gh pr comment "$PR_NUMBER" --body "✔️ Successfully merged via CD workflow"
 
   notify:
     needs: [validate, promote]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Summary
+      - name: Workflow status
         run: |
-          echo "CD Workflow Result: ${{ needs.promote.result || 'skipped' }}"
-          echo "Commits promoted: ${{ needs.validate.outputs.commits-count || '0' }}"
+          echo "=== CD Promotion Summary ==="
+          echo "Validation: ${{ needs.validate.outputs.validation-status || 'unknown' }}"
+          echo "Promotion: ${{ needs.promote.result || 'skipped' }}"
+          echo "Commits: ${{ needs.validate.outputs.commits-count || '0' }}"
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          
+          if [[ "${{ needs.promote.result }}" == "failure" ]]; then
+            echo "::error::Promotion failed"
+            exit 1
+          fi
