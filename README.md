@@ -13,5 +13,3 @@ Authentification_Security
 Merci !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
-# Test CD workflow Sat May 31 02:53:44 AM CEST 2025
-# Test Docker CI
