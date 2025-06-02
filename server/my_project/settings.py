@@ -27,6 +27,9 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'server']
 
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = ["http://localhost:8000", "http://localhost:5173"]
+
 
 # Application definition
 
@@ -56,6 +59,11 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django_prometheus.middleware.PrometheusAfterMiddleware',
 ]
+
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+]
+
 
 ROOT_URLCONF = 'my_project.urls'
 
@@ -138,3 +146,13 @@ CELERY_TASK_SERIALIZER = 'json'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# password forget
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.gmail.com"  # Utilise Gmail (change selon ton hébergeur)
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = "tonemail@gmail.com"  # 🔥 Change avec ton email
+EMAIL_HOST_PASSWORD = "mot_de_passe_app"  # 🔥 Utilise un mot de passe sécurisé (OAuth recommandé)
+DEFAULT_FROM_EMAIL = "tonemail@gmail.com"

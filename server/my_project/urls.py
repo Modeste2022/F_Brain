@@ -18,11 +18,11 @@ from django.urls import path, include
 from django.contrib import admin
 from django.http import HttpResponse
 
-# def home(request):
-#     return HttpResponse("<h1>Bienvenue sur mon application Django !</h1>")
+def home(request):
+    return HttpResponse("<h1>Bienvenue sur mon application Django !</h1>")
 
 urlpatterns = [
-    # path('', home, name='home'),  # ✅ Ajoute cette route
+    path('api/', home, name='home'),  # ✅ Ajoute cette route
     path('admin/', admin.site.urls),
     path('', include('auth_sec.urls')),
     
