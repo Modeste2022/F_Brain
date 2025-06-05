@@ -2,12 +2,13 @@ import { useState } from "react";
 import { resetPassword } from "../api";
 
 const PasswordReset = () => {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [message, setMessage] = useState("");
 
   const handleReset = async (e) => {
     e.preventDefault();
-    const data = await resetPassword(email);
+    const data = await resetPassword(username, newPassword);
     setMessage(data.message || data.error);
   };
 
@@ -16,9 +17,21 @@ const PasswordReset = () => {
       <div style={styles.card}>
         <h2 style={styles.title}>Réinitialisation du mot de passe</h2>
         <form onSubmit={handleReset} style={styles.form}>
-          <input style={styles.input} type="email" placeholder="Votre email" 
-            onChange={(e) => setEmail(e.target.value)} required />
-          <button type="submit" style={styles.button}>Envoyer les instructions</button>
+          <input
+            style={styles.input}
+            type="text"
+            placeholder="Nom d'utilisateur"
+            onChange={(e) => setUsername(e.target.value)}
+            required
+          />
+          <input
+            style={styles.input}
+            type="password"
+            placeholder="Nouveau mot de passe"
+            onChange={(e) => setNewPassword(e.target.value)}
+            required
+          />
+          <button type="submit" style={styles.button}>Réinitialiser</button>
         </form>
         {message && <p style={styles.message}>{message}</p>}
       </div>
