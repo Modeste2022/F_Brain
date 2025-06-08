@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - dev
-  pull_request:
-    branches: ['**']  # Rendre visible sur toutes les branches
   workflow_dispatch:
     inputs:
       force_promotion:
