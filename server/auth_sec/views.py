@@ -45,26 +45,21 @@ def login_view(request):
 @csrf_exempt
 def password_reset_request(request):
     if request.method == "POST":
-        email = request.POST.get("email")
+        username = request.POST.get("username")
+        new_password = request.POST.get("new_password")
 
-        if not User.objects.filter(email=email).exists():
-            return JsonResponse({"error": "Aucun compte associé à cet email"}, status=404)
+        if not username or not new_password:
+            return JsonResponse({"error": "Le nom d'utilisateur et le nouveau mot de passe sont obligatoires"}, status=400)
 
-        # 🔥 Générer un jeton sécurisé
-        token = get_random_string(50)
-        user = User.objects.get(email=email)
-        user.set_password(token)  # 🔥 Sauvegarde temporaire du token comme mot de passe
+        try:
+            user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return JsonResponse({"error": "Aucun compte trouvé avec ce nom d'utilisateur"}, status=404)
+
+        # 🔥 Mettre à jour le mot de passe
+        user.set_password(new_password)
         user.save()
 
-        # 🔥 Envoyer l’email avec le lien de réinitialisation
-        send_mail(
-            "Réinitialisation de mot de passe",
-            f"Voici votre nouveau mot de passe temporaire : {token}\nModifiez-le immédiatement !",
-            "tonemail@gmail.com",
-            [email],
-            fail_silently=False,
-        )
-
-        return JsonResponse({"message": "Un email de réinitialisation a été envoyé."}, status=200)
+        return JsonResponse({"message": "Mot de passe mis à jour avec succès"}, status=200)
 
     return JsonResponse({"error": "Méthode non autorisée"}, status=405)
